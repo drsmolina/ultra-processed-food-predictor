@@ -1,0 +1,274 @@
+---
+title: "Ultra-Processed Food Score Predictor"
+author: "Daphne Rose Molina"
+output: html_document
+---
+
+# Introduction
+
+This notebook loads a sample of OpenFoodFacts products that I downloaded via the API in R.  
+For now, I just want to confirm that the data loads correctly and has the columns I need  
+for the Ultra-Processed Food Score Predictor project.
+
+Later, I will expand this notebook into a full pipeline (cleaning, NLP, ML).
+
+---
+#Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(tidytext)
+```
+
+#Load the raw data
+```{r}
+off <- readRDS("data/raw/openfoodfacts_api_sample.rds")
+dim(off)
+names(off)[1:20]
+
+```
+#Look at first few rows
+```{r}
+off %>%
+as_tibble() %>%
+glimpse()
+
+```
+#Basic cleaning: ingredients + simple nutrient features
+```{r}
+cleaned <- off %>%
+filter(!is.na(nova_group)) %>%
+filter(!is.na(ingredients_text)) %>%
+mutate(
+# clean ingredients text
+ingredients_clean = ingredients_text %>%
+str_to_lower() %>%
+str_replace_all("[^a-z ]", " ") %>%
+str_squish(),
+energy_kj   = as.numeric(`nutriments.energy`),
+energy_kcal = as.numeric(`nutriments.energy-kcal`)
+
+
+)
+```
+#Check the cleaned data
+```{r}
+cleaned %>%
+select(product_name, ingredients_clean, nova_group, energy_kj, energy_kcal) %>%
+head(10)
+
+```
+## How many products in each NOVA group?
+```{r}
+cleaned %>%
+  count(nova_group) %>%
+  arrange(nova_group)
+```
+```{r}
+cleaned %>%
+  count(nova_group) %>%
+  ggplot(aes(x = factor(nova_group), y = n)) +
+  geom_col() +
+  labs(
+    x = "NOVA group",
+    y = "Number of products",
+    title = "Count of products by NOVA group"
+  )
+
+```
+#Tokenize ingredients into individual words
+```{r}
+tokens <- cleaned %>%
+  select(product_name, nova_group, ingredients_clean) %>%
+  unnest_tokens(word, ingredients_clean)
+```
+# Look at a few tokenized rows
+```{r}
+tokens %>%
+  head(15)
+```
+# see the most common words by NOVA
+```{r}
+word_counts <- tokens %>%
+  count(nova_group, word, sort = TRUE)
+
+# Top words for NOVA 4 (ultra-processed)
+word_counts %>%
+  filter(nova_group == 4) %>%
+  head(20)
+```
+#Add custom stopwords and length filter
+```{r}
+# Custom stopwords (French/connector junk)
+custom_stop <- tibble::tibble(
+  word = c("de", "d", "du", "des", "en", "et", "a", "au", "aux", "avec", "pour", "sur", "dans", "par", "le", "la", "les")
+)
+
+tokens_clean <- tokens %>%
+  # keep only alphabetic tokens
+  dplyr::filter(str_detect(word, "^[a-z]+$")) %>%
+  # drop super short words (1–2 letters)
+  dplyr::filter(nchar(word) >= 3) %>%
+  # remove English stopwords from tidytext
+  anti_join(stop_words, by = "word") %>%
+  # remove our custom French/connector stopwords
+  anti_join(custom_stop, by = "word")
+
+```
+#recompute word counts
+```{r}
+word_counts_clean <- tokens_clean %>%
+  count(nova_group, word, sort = TRUE)
+
+# Top words for NOVA 4 after cleaning
+word_counts_clean %>%
+  filter(nova_group == 4) %>%
+  head(20)
+
+```
+Which words are especially characteristic of ultra-processed foods (NOVA 4), not just common everywhere?
+#TF–IDF for Ultra-Processed Foods
+```{r}
+# Count words per product (document) first
+tfidf_raw <- tokens_clean %>%
+  count(product_name, nova_group, word, sort = TRUE)
+
+# Compute TF-IDF for each word within each product
+tfidf <- tfidf_raw %>%
+  bind_tf_idf(word, product_name, n)
+
+# Peek at the tf-idf table
+tfidf %>%
+  arrange(desc(tf_idf)) %>%
+  head(15)
+```
+# Average TF-IDF per word within each NOVA group
+```{r}
+tfidf_group <- tfidf %>%
+  group_by(nova_group, word) %>%
+  summarise(mean_tfidf = mean(tf_idf), .groups = "drop") %>%
+  arrange(nova_group, desc(mean_tfidf))
+```
+
+# Top 20 most "characteristic" words for NOVA 4
+```{r}
+tfidf_group %>%
+  filter(nova_group == 4) %>%
+  head(20)
+```
+# Add document frequency: in how many products does each word appear?
+```{r}
+tfidf_filtered <- tfidf %>%
+  group_by(word) %>%
+  mutate(doc_freq = n_distinct(product_name)) %>%
+  ungroup() %>%
+  # keep words that appear in at least 10 products
+  filter(doc_freq >= 10)
+```
+# Recompute mean tf-idf per (nova_group, word) on this filtered set
+```{r}
+tfidf_group_filtered <- tfidf_filtered %>%
+  group_by(nova_group, word) %>%
+  summarise(mean_tfidf = mean(tf_idf), .groups = "drop") %>%
+  arrange(nova_group, desc(mean_tfidf))
+```
+
+# Look at top 20 for NOVA 4 again
+```{r}
+tfidf_group_filtered %>%
+  filter(nova_group == 4) %>%
+  head(20)
+```
+#Build simple bag-of-words features (top 50 words)
+```{r}
+top_words <- tokens_clean %>%
+  count(word, sort = TRUE) %>%
+  slice_max(n, n = 50) %>%
+  pull(word)
+
+length(top_words)
+head(top_words)
+```
+#document-term matrix (one row per product, one column per word)
+```{r}
+library(tidyr)
+
+dtm <- tokens_clean %>%
+  filter(word %in% top_words) %>%
+  count(product_name, word) %>%
+  pivot_wider(
+    names_from = word,
+    values_from = n,
+    values_fill = 0
+  )
+
+# Check the shape
+dim(dtm)
+head(dtm[, 1:8])
+```
+#Build modeling dataset
+```{r}
+model_data <- cleaned %>%
+  select(product_name, nova_group, energy_kcal) %>%
+  inner_join(dtm, by = "product_name") %>%
+  mutate(
+    is_upf = if_else(nova_group == 4, 1L, 0L)
+  )
+
+dim(model_data)
+head(model_data[, 1:10])
+```
+#Train/test split
+```{r}
+set.seed(123)
+
+n <- nrow(model_data)
+train_idx <- sample(seq_len(n), size = 0.8 * n)
+
+train <- model_data[train_idx, ]
+test  <- model_data[-train_idx, ]
+
+# Drop non-feature columns for modeling
+feature_cols <- setdiff(names(train), c("product_name", "nova_group", "is_upf"))
+
+# Build formula: is_upf ~ all features
+formula_upf <- as.formula(
+  paste("is_upf ~", paste(feature_cols, collapse = " + "))
+)
+
+formula_upf
+```
+#Fit logistic regression model
+```{r}
+fit_upf <- glm(
+  formula_upf,
+  data = train,
+  family = binomial()
+)
+
+summary(fit_upf)
+```
+#Evaluate on test set
+```{r}
+# Get predicted probabilities
+test$prob <- predict(fit_upf, newdata = test, type = "response")
+
+# Convert to class predictions (0/1)
+test$pred <- if_else(test$prob > 0.5, 1L, 0L)
+
+# Confusion matrix
+cm <- table(
+  truth = test$is_upf,
+  pred  = test$pred
+)
+cm
+
+# Accuracy (ignore any NA rows)
+mean(test$pred == test$is_upf, na.rm = TRUE)
+
+# Accuracy computed from confusion matrix
+accuracy <- (cm[1,1] + cm[2,2]) / sum(cm)
+accuracy
+```
+Using a simple bag-of-words representation of the ingredient list (top 50 words) plus energy_kcal as a numeric feature, I trained a logistic regression model to predict whether a product was ultra-processed (NOVA 4) or not. On a held-out test set, the model achieved an accuracy of 73% (229 correct out of 314), with 149 correctly identified ultra-processed products and 80 correctly identified non-ultra-processed products. This shows that even a lightweight text-plus-nutrient feature set contains enough signal to meaningfully distinguish ultra-processed foods from other products.
