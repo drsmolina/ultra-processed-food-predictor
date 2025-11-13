@@ -14,12 +14,15 @@ Later, I will expand this notebook into a full pipeline (cleaning, NLP, ML).
 
 ---
 #Setup
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(tidytext)
-```
+
+# source helper scripts
+source("R/cleaning.R")
+source("R/model.R")
+
 
 #Load the raw data
 ```{r}
