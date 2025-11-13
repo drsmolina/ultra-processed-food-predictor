@@ -22,3 +22,15 @@ Ultra-processed foods are linked to chronic disease risk. Being able to classify
 
 This project will also serve as the foundation for a follow-up project:
 a **Healthy Basket Index**, which scores entire grocery baskets using these product-level predictions.
+## Requirements
+
+This project was developed and tested with:
+
+- R >= 4.5.0
+- The following R packages:
+
+```r
+install.packages(c(
+  "tidyverse",
+  "tidytext"
+))
